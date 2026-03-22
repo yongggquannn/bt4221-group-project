@@ -18,7 +18,27 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-spark = SparkSession.builder.appName("mrt_lrt_stations_extractor").getOrCreate()
+os.environ["SPARK_SUBMIT_OPTS"] = (
+    "--add-opens java.base/javax.security.auth=ALL-UNNAMED "
+    "--add-opens java.base/sun.nio.ch=ALL-UNNAMED "
+    "--add-opens java.base/java.lang=ALL-UNNAMED "
+    "--add-opens java.base/java.util=ALL-UNNAMED"
+)
+
+spark = (
+    SparkSession.builder
+    .appName("mrt_lrt_stations_extractor")
+    .config("spark.driver.extraJavaOptions",
+            "--add-opens java.base/javax.security.auth=ALL-UNNAMED "
+            "--add-opens java.base/sun.nio.ch=ALL-UNNAMED "
+            "--add-opens java.base/java.lang=ALL-UNNAMED "
+            "--add-opens java.base/java.util=ALL-UNNAMED "
+            "-Djava.security.manager=allow")
+    .config("spark.executor.extraJavaOptions",
+            "--add-opens java.base/javax.security.auth=ALL-UNNAMED "
+            "-Djava.security.manager=allow")
+    .getOrCreate()
+)
 
 llm = ChatOpenAI(
     model="gpt-5",
@@ -283,9 +303,8 @@ def transform_data(state: PipelineState) -> PipelineState:
 
 
 def decide_output(state: PipelineState) -> PipelineState:
-    """Write cleaned MRT/LRT station data to dataset/transport as CSV."""
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    output_dir = os.path.join(project_root, "dataset", "transport")
+    """Write cleaned MRT/LRT station data to same directory as this script."""
+    output_dir = os.path.dirname(os.path.abspath(__file__))
     os.makedirs(output_dir, exist_ok=True)
 
     path = os.path.join(output_dir, "mrt_lrt_stations.csv")
