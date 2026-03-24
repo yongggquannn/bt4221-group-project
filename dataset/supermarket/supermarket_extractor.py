@@ -122,6 +122,11 @@ def plan_extraction(state: PipelineState) -> PipelineState:
             "Decide which fields are useful for the ML pipeline. "
             "The target variable is HDB resale_price. Supermarket proximity is a "
             "known predictor of resale value.\n\n"
+            "IMPORTANT:\n"
+            "- Do NOT include fields whose sample value is null or empty.\n"
+            "- Latitude and longitude are ALREADY extracted from geometry coordinates — "
+            "do NOT add any lat/lng/lon/latitude/longitude fields.\n"
+            "- Only use source_keys that appear in the parsed description keys provided.\n\n"
             "Respond ONLY with valid JSON:\n"
             "{\n"
             '  "decision": "proceed" | "abort",\n'
