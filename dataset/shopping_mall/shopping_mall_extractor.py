@@ -38,6 +38,8 @@ def clean_and_save_malls():
     df = df.filter(F.col("name").isNotNull() & (F.col("name") != ""))
     df = df.dropDuplicates(["name"])
     df = df.filter(F.col("lat").isNotNull() & F.col("lon").isNotNull())
+    # Select only name, lat, lon columns
+    df = df.select("name", "lat", "lon")
 
     logger.info("Writing %d cleaned mall records to %s", df.count(), output_path)
     df.toPandas().to_csv(output_path, index=False)
