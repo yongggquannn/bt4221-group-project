@@ -3,6 +3,7 @@
 An end-to-end pipeline for predicting HDB resale flat prices in Singapore using PySpark and LLM-guided agents.
 
 **Pipeline Overview:**
+
 1. **Dataset Extraction** — Auxiliary amenity datasets (hawker centres, shopping malls, supermarkets, MRT/LRT stations, schools)
 2. **HDB Data Loading & Geocoding** — Downloads resale price data from Data.gov.sg and geocodes addresses via OneMap
 3. **Data Cleaning** — LLM-guided agent profiles the data and applies structured PySpark cleaning operations
@@ -21,14 +22,13 @@ Clone or download this repository and upload the entire project folder to your G
 My Drive/
 └── bt4221-group-project/
     ├── bt4221_grp_project.ipynb
-    ├── dataset/
-    │   ├── hawker_centre/
-    │   ├── shopping_mall/
-    │   ├── supermarket/
-    │   ├── transport/
-    │   ├── school/
-    │   └── demographics/
-    └── pipeline/
+    └── dataset/
+        ├── hawker_centre/
+        ├── shopping_mall/
+        ├── supermarket/
+        ├── transport/
+        ├── school/
+        └── demographics/
 ```
 
 > The `dataset/` subdirectories contain pre-extracted CSVs. If they are empty or missing, Section 1 of the notebook will regenerate them via API calls (requires internet access and may take several minutes).
@@ -40,16 +40,19 @@ My Drive/
 The notebook reads credentials from **Colab Secrets** (recommended) or a `.env` file.
 
 **To add Colab Secrets:**
+
 1. Open the notebook in Google Colab
 2. Click the **key icon** in the left sidebar (Secrets)
 3. Add each secret below with the toggle set to **enabled for this notebook**
 
-| Secret Name | Where to get it |
-|---|---|
-| `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) |
-| `GOV_DATA` | [data.gov.sg](https://data.gov.sg) — create a free account and generate an API key |
-| `ONEMAP_EMAIL` | Email used to register at [onemap.gov.sg](https://www.onemap.gov.sg/apidocs/) |
-| `ONEMAP_PASSWORD` | Password for your OneMap account |
+
+| Secret Name       | Where to get it                                                                    |
+| ----------------- | ---------------------------------------------------------------------------------- |
+| `OPENAI_API_KEY`  | [platform.openai.com](https://platform.openai.com/api-keys)                        |
+| `GOV_DATA`        | [data.gov.sg](https://data.gov.sg) — create a free account and generate an API key |
+| `ONEMAP_EMAIL`    | Email used to register at [onemap.gov.sg](https://www.onemap.gov.sg/apidocs/)      |
+| `ONEMAP_PASSWORD` | Password for your OneMap account                                                   |
+
 
 > **Alternative (local only):** Copy `.env.example` to `.env` and fill in your keys. Do **not** commit `.env` to version control.
 
@@ -68,6 +71,7 @@ The notebook reads credentials from **Colab Secrets** (recommended) or a `.env` 
 Run cells sequentially from top to bottom (**Runtime → Run all**, or Shift+Enter cell by cell).
 
 **Cell 4** mounts Google Drive and sets the working directory:
+
 ```python
 from google.colab import drive
 drive.mount('/content/drive')
@@ -82,35 +86,41 @@ os.chdir('/content/drive/MyDrive/bt4221-group-project')
 
 ### Section notes
 
-| Section | Runtime | Notes |
-|---|---|---|
-| **1 — Dataset Extraction** | 5–15 min | Skipped automatically if CSV files already exist in `dataset/` |
-| **2 — HDB Data Loading** | 2–5 min | Downloads ~1M rows from Data.gov.sg |
-| **2e — Geocoding** | 20–40 min (first run only) | Geocodes ~10k unique addresses via OneMap; results cached to `dataset/geocoded_addresses.csv` and skipped on subsequent runs |
-| **3 — Data Cleaning** | 5–10 min | Requires `OPENAI_API_KEY` for LLM-guided cleaning |
-| **4 — ML Pipeline** | 5–10 min | Feature engineering stubs — see TODO items |
+
+| Section                    | Runtime                    | Notes                                                                                                                        |
+| -------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **1 — Dataset Extraction** | 5–15 min                   | Skipped automatically if CSV files already exist in `dataset/`                                                               |
+| **2 — HDB Data Loading**   | 2–5 min                    | Downloads ~1M rows from Data.gov.sg                                                                                          |
+| **2e — Geocoding**         | 20–40 min (first run only) | Geocodes ~10k unique addresses via OneMap; results cached to `dataset/geocoded_addresses.csv` and skipped on subsequent runs |
+| **3 — Data Cleaning**      | 5–10 min                   | Requires `OPENAI_API_KEY` for LLM-guided cleaning                                                                            |
+| **4 — ML Pipeline**        | 5–10 min                   | Feature engineering stubs — see TODO items                                                                                   |
+
 
 ---
 
 ## Running Locally
 
 **Prerequisites:**
+
 - Python 3.10+
 - Java 17+ (`brew install openjdk@17` on macOS)
 - `JAVA_HOME` set to your JDK installation
 
 **Install dependencies:**
+
 ```bash
 pip install pyspark langgraph langchain langchain-openai openai python-dotenv beautifulsoup4 matplotlib seaborn
 ```
 
 **Set up secrets:**
+
 ```bash
 cp .env.example .env
 # Fill in your API keys in .env
 ```
 
 **Run the notebook:**
+
 ```bash
 jupyter notebook bt4221_grp_project.ipynb
 ```
@@ -141,10 +151,10 @@ dataset/
 **Geocoding cell hangs with no output**
 The geocoding cell (Section 2e) uses `toPandas()` to extract unique addresses before making API calls. If it appears to hang, wait for the first print output — the Spark job may take a few minutes to collect results. Progress is printed every 100 addresses.
 
-**`Missing secret 'X'` error**
+`**Missing secret 'X'` error**
 A required API key is not set. Check that all four secrets are added in Colab Secrets with the notebook access toggle enabled.
 
-**`DateTimeException: CANNOT_PARSE_TIMESTAMP`**
+`**DateTimeException: CANNOT_PARSE_TIMESTAMP`**
 This was a known issue in earlier versions of the notebook caused by Spark 3.4+ columnar evaluation. It has been fixed in `_transaction_month_to_date` (Section 3b). Re-run from Cell 1 to pick up the fix.
 
 **Drive path not found**
