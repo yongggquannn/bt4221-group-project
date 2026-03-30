@@ -14,11 +14,18 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-llm = ChatOpenAI(
-    model="gpt-4o",
-    temperature=0,
-    api_key=os.getenv("OPENAI_API_KEY"),
-)
+_llm = None
+
+def get_llm() -> ChatOpenAI:
+    """Lazy-initialize the LLM client (avoids import-time API key errors)."""
+    global _llm
+    if _llm is None:
+        _llm = ChatOpenAI(
+            model="gpt-4o",
+            temperature=0,
+            api_key=os.environ["OPENAI_API_KEY"],
+        )
+    return _llm
 
 
 # ---------------------------------------------------------------------------
@@ -26,14 +33,14 @@ llm = ChatOpenAI(
 # ---------------------------------------------------------------------------
 
 class AgentState(TypedDict):
-    """Shared state flowing through the LangGraph pipeline."""
+    """Shared state flowing through the LangGraph pipeline.
+
+    Cleaning is handled by Section 3 of the notebook (LLM-guided cleaning agent).
+    This pipeline starts from the already-cleaned DataFrame (clean_df).
+    """
 
     # Input: dataset metadata populated before pipeline starts
     dataset_info: dict          # schema, row count, column types, null counts, sample values
-
-    # Cleaning stage
-    cleaning_config: dict       # JSON from cleaning agent (outlier_method, null_handling, etc.)
-    cleaned_data_summary: dict  # column stats, correlations, sample after cleaning
 
     # Feature engineering stage
     feature_config: dict        # JSON from FE agent (distance_features, time_features, etc.)
@@ -62,61 +69,7 @@ def _log_entry(agent_name: str, detail: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node 1: cleaning_agent
-# ---------------------------------------------------------------------------
-
-def cleaning_agent(state: AgentState) -> dict:
-    """LLM agent that produces structured cleaning decisions from dataset_info."""
-    logger.info("Node: cleaning_agent")
-
-    # TODO: implement full agent skill in US-5.3
-    # Expected: call OpenAI with dataset_info, return JSON with keys:
-    #   storey_range_strategy, outlier_method, outlier_threshold,
-    #   null_handling, columns_to_drop, duplicate_strategy
-
-    cleaning_config = {
-        "storey_range_strategy": "midpoint",
-        "outlier_method": "IQR",
-        "outlier_threshold": 1.5,
-        "null_handling": {"default": "drop"},
-        "columns_to_drop": [],
-        "duplicate_strategy": "drop_exact",
-    }
-
-    logs = list(state.get("agent_logs", []))
-    logs.append(_log_entry("cleaning_agent", "Produced cleaning config (stub)"))
-
-    return {"cleaning_config": cleaning_config, "agent_logs": logs}
-
-
-# ---------------------------------------------------------------------------
-# Node 2: apply_cleaning
-# ---------------------------------------------------------------------------
-
-def apply_cleaning(state: AgentState) -> dict:
-    """PySpark node that executes cleaning based on cleaning_config."""
-    logger.info("Node: apply_cleaning")
-
-    config = state["cleaning_config"]
-
-    # TODO: implement PySpark cleaning logic
-    # Read config["outlier_method"], config["null_handling"], etc.
-    # Apply to Spark DataFrame (accessed via module-level reference)
-
-    cleaned_data_summary = {
-        "rows_before": 0,
-        "rows_after": 0,
-        "columns": [],
-        "null_counts": {},
-        "outliers_removed": 0,
-        "duplicates_removed": 0,
-    }
-
-    return {"cleaned_data_summary": cleaned_data_summary}
-
-
-# ---------------------------------------------------------------------------
-# Node 3: feature_engineering_agent
+# Node 1: feature_engineering_agent
 # ---------------------------------------------------------------------------
 
 def feature_engineering_agent(state: AgentState) -> dict:
@@ -124,7 +77,7 @@ def feature_engineering_agent(state: AgentState) -> dict:
     logger.info("Node: feature_engineering_agent")
 
     # TODO: implement full agent skill in US-5.4
-    # Expected: call OpenAI with cleaned_data_summary, return JSON with keys:
+    # Expected: call OpenAI with dataset_info (cleaned data summary), return JSON with keys:
     #   distance_features, time_features, categorical_features,
     #   binning, interaction_features, features_to_drop
 
@@ -144,18 +97,20 @@ def feature_engineering_agent(state: AgentState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node 4: apply_feature_engineering
+# Node 2: apply_feature_engineering
 # ---------------------------------------------------------------------------
 
 def apply_feature_engineering(state: AgentState) -> dict:
     """PySpark node that creates features based on feature_config."""
     logger.info("Node: apply_feature_engineering")
 
-    config = state["feature_config"]
+    _ = state["feature_config"]  # will be used when TODO is implemented
 
-    # TODO: implement PySpark feature engineering logic
-    # Read config and create distance, time, categorical, binning,
-    # interaction features on the Spark DataFrame
+    # TODO: implement PySpark feature engineering logic (US-2.1 through US-2.4)
+    # - Compute Haversine distances to nearest amenities (broadcast join)
+    # - Create time-based features (transaction_quarter, years_since_lease_start)
+    # - Encode categoricals via StringIndexer + OneHotEncoder
+    # - Create interaction features (floor_area * remaining_lease)
 
     feature_summary = {
         "features_created": [],
@@ -167,16 +122,22 @@ def apply_feature_engineering(state: AgentState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node 5: train_models
+# Node 3: train_models  (PySpark MLlib per US-4.2/4.3/4.4)
 # ---------------------------------------------------------------------------
 
 def train_models(state: AgentState) -> dict:
-    """Train ML models and compute evaluation metrics."""
+    """Train ML models using PySpark MLlib and compute evaluation metrics."""
     logger.info("Node: train_models")
 
-    # TODO: implement PySpark MLlib training
-    # Train 3 models (e.g. LinearRegression, RandomForestRegressor, GBTRegressor)
-    # Compute RMSE, MAE, R², MAPE for each
+    # TODO: implement PySpark MLlib training (US-4.1 through US-4.5)
+    # 1. Train/test split: df.randomSplit([0.8, 0.2], seed=42)
+    # 2. Assemble feature vector via VectorAssembler
+    # 3. Train models:
+    #    - pyspark.ml.regression.LinearRegression
+    #    - pyspark.ml.regression.RandomForestRegressor (numTrees=100, maxDepth=10)
+    #    - pyspark.ml.regression.GBTRegressor (maxIter=100, maxDepth=5)
+    # 4. Evaluate with RegressionEvaluator (RMSE, MAE, R-squared)
+    # 5. Optional: CrossValidator with ParamGridBuilder (k=5)
 
     model_results = {
         "LinearRegression": {"RMSE": 0.0, "MAE": 0.0, "R2": 0.0, "MAPE": 0.0},
@@ -188,7 +149,7 @@ def train_models(state: AgentState) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Node 6: evaluation_agent
+# Node 4: evaluation_agent
 # ---------------------------------------------------------------------------
 
 def evaluation_agent(state: AgentState) -> dict:
@@ -218,21 +179,21 @@ def evaluation_agent(state: AgentState) -> dict:
 # ---------------------------------------------------------------------------
 
 def build_pipeline():
-    """Build and compile the LangGraph pipeline with 6 nodes in linear sequence."""
+    """Build and compile the LangGraph pipeline with 4 nodes in linear sequence.
+
+    Cleaning is handled separately in Section 3 of the notebook.
+    This pipeline starts from the already-cleaned DataFrame.
+    """
     graph = StateGraph(AgentState)
 
     # Add nodes
-    graph.add_node("cleaning_agent", cleaning_agent)
-    graph.add_node("apply_cleaning", apply_cleaning)
     graph.add_node("feature_engineering_agent", feature_engineering_agent)
     graph.add_node("apply_feature_engineering", apply_feature_engineering)
     graph.add_node("train_models", train_models)
     graph.add_node("evaluation_agent", evaluation_agent)
 
-    # Linear edges: START → cleaning_agent → ... → evaluation_agent → END
-    graph.add_edge(START, "cleaning_agent")
-    graph.add_edge("cleaning_agent", "apply_cleaning")
-    graph.add_edge("apply_cleaning", "feature_engineering_agent")
+    # Linear edges: START -> feature_engineering_agent -> ... -> evaluation_agent -> END
+    graph.add_edge(START, "feature_engineering_agent")
     graph.add_edge("feature_engineering_agent", "apply_feature_engineering")
     graph.add_edge("apply_feature_engineering", "train_models")
     graph.add_edge("train_models", "evaluation_agent")
@@ -255,12 +216,12 @@ if __name__ == "__main__":
         with open(output_path, "wb") as f:
             f.write(png_bytes)
         logger.info("Pipeline visualization saved to %s", output_path)
-    except Exception as e:
+    except (ImportError, RuntimeError, OSError) as e:
         logger.warning("Could not generate PNG visualization: %s", e)
         # Fallback: print Mermaid diagram as text
         print(pipeline.get_graph().draw_mermaid())
 
-    # Run pipeline with initial state
+    # Run pipeline with initial state (cleaning already done in Section 3)
     initial_state: AgentState = {
         "dataset_info": {
             "columns": ["month", "town", "flat_type", "block", "street_name",
@@ -271,8 +232,6 @@ if __name__ == "__main__":
             "null_counts": {},
             "sample_values": {},
         },
-        "cleaning_config": {},
-        "cleaned_data_summary": {},
         "feature_config": {},
         "feature_summary": {},
         "model_results": {},
