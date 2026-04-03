@@ -1,3 +1,7 @@
+## Notebook Comments
+
+Never reference user story IDs (e.g. `US-2.1`, `US-5.4`) in code comments, markdown cells, or print statements inside the notebook. Use plain descriptive labels instead (e.g. "Distance features", "School quality features"). User story IDs belong in GitHub issues and commit messages, not in the codebase.
+
 ## User Story Search
 
 For **user stories**, **issues**, **tasks**, **tickets**, backlog, sprints, or “what needs to be done”: query GitHub with **`gh`** — never guess.
