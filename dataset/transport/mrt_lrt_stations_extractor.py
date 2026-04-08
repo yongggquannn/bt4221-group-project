@@ -199,10 +199,10 @@ def decide_output(state: PipelineState) -> PipelineState:
         spark.createDataFrame(state["validated_data"])
         .toPandas()
         .rename(columns={
-            "station_name": "Station Name",
-            "exit_code": "Exit Code",
-            "latitude": "Latitude",
-            "longitude": "Longitude",
+            "station_name": "station_name",
+            "exit_code": "exit_code",
+            "latitude": "latitude",
+            "longitude": "longitude",
         })
         .to_csv(path, index=False)
     )
