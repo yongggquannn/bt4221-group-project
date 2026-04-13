@@ -1,18 +1,18 @@
 import os
 import json
 import logging
-from typing import TypedDict, Literal
+from typing import Optional, TypedDict, Literal
 
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field
 from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from pyspark.sql.types import (
-    StringType, StructField, StructType, DoubleType, IntegerType,
-)
+from pyspark.sql.types import StringType, StructField, StructType, DoubleType, IntegerType
 
 from langgraph.graph import StateGraph, END
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.tools import tool
 
 load_dotenv()
 
@@ -41,367 +41,233 @@ spark = (
     .getOrCreate()
 )
 
+
+# ── Pydantic models ───────────────────────────────────────────────────────────
+
+class HawkerCentreRecord(BaseModel):
+    hawker_name: str = Field(..., description="Hawker centre name")
+    hawker_lat: float = Field(..., description="WGS-84 latitude")
+    hawker_lng: float = Field(..., description="WGS-84 longitude")
+    hawker_postal_code: Optional[str] = Field(None, description="Postal code")
+    hawker_status: Optional[str] = Field(None, description="Operational status, e.g. 'Existing'")
+    hawker_stall_count: Optional[int] = Field(None, description="Number of cooked food stalls")
+    hawker_original_completion_year: Optional[str] = Field(None, description="Original completion date/year")
+    hawker_hup_completion_date: Optional[str] = Field(None, description="HUP completion date")
+    hawker_description: Optional[str] = Field(None, description="HUP programme description")
+
+
+class ExtractionQuality(BaseModel):
+    decision: Literal["proceed", "abort"]
+    reasoning: str
+    total_records: int
+    null_name_count: int
+
+
+# ── LLM & tools ───────────────────────────────────────────────────────────────
+
 llm = ChatOpenAI(
-    model="gpt-5",
+    model="gpt-4o-mini",
     temperature=0,
     api_key=os.getenv("OPENAI_API_KEY"),
 )
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-GEOJSON_PATH = os.path.join(SCRIPT_DIR, "HawkerCentresGEOJSON.geojson")
+
+@tool
+def inspect_hawker_data(placeholder: str = "inspect") -> str:
+    """Inspect the hawker centre records loaded from GeoJSON to assess data quality.
+    Returns total record count, null name count, sample records, and status breakdown.
+    Call this tool before making a quality decision."""
+    return ""
+
+
+llm_with_tools = llm.bind_tools([inspect_hawker_data])
+
+
+# ── Pipeline state ────────────────────────────────────────────────────────────
 
 class PipelineState(TypedDict):
-    geojson_path: str
-    raw_features: list[dict]        # raw GeoJSON features
-    extraction_plan: dict           # agent's plan on which fields to extract
-    extracted_data: list[dict]      # flat dicts after field extraction
-    validated_data: list[dict]      # after quality checks
-    transformed_data: list[dict]    # final cleaned records
-    quality_report: dict
+    raw_data: list[dict]
+    validated_data: list[dict]
     agent_decision: str
     agent_reasoning: str
-    retry_count: int
     output_path: str
 
 
-def plan_extraction(state: PipelineState) -> PipelineState:
-    """LLM agent inspects the GeoJSON schema and decides which fields to extract."""
-    logger.info("Node: plan_extraction")
+# ── Pipeline nodes ────────────────────────────────────────────────────────────
 
-    # Read the GeoJSON and grab a sample feature for schema inspection
-    with open(state["geojson_path"], "r") as f:
-        geojson = json.load(f)
-
-    features = geojson.get("features", [])
-    state["raw_features"] = features
-
-    if not features:
-        state["agent_decision"] = "abort"
-        state["agent_reasoning"] = "GeoJSON contains no features."
-        return state
-
-    sample = features[0]
-    sample_props = sample.get("properties", {})
-    sample_geom = sample.get("geometry", {})
-
-    response = llm.invoke([
-        SystemMessage(content=(
-            "You are a data engineering agent for a Singapore HDB resale price prediction project. "
-            "You are given the schema of a GeoJSON file containing hawker centre locations. "
-            "Decide which fields are useful for the ML pipeline. "
-            "The target variable is HDB resale_price. Hawker centre proximity and size are "
-            "known predictors of resale value.\n\n"
-            "IMPORTANT:\n"
-            "- Do NOT include fields whose sample value is null or empty.\n"
-            "- Latitude and longitude are ALREADY extracted from geometry coordinates — "
-            "do NOT add any lat/lng/lon/latitude/longitude/point/x/y coordinate fields.\n"
-            "- Only use source_keys that exist in the sample properties keys provided.\n\n"
-            "Respond ONLY with valid JSON:\n"
-            "{\n"
-            '  "decision": "proceed" | "abort",\n'
-            '  "reasoning": "...",\n'
-            '  "fields_to_extract": [\n'
-            '    {"source_key": "NAME", "target_column": "hawker_name", "dtype": "string"},\n'
-            "    ...\n"
-            "  ],\n"
-            '  "filter_status": "Existing"  // or null if no filter\n'
-            "}"
-        )),
-        HumanMessage(content=(
-            f"GeoJSON name: {geojson.get('name', 'unknown')}\n"
-            f"Total features: {len(features)}\n"
-            f"Sample geometry: {json.dumps(sample_geom)}\n"
-            f"Sample properties keys: {list(sample_props.keys())}\n"
-            f"Sample properties values: {json.dumps(sample_props, default=str)}"
-        )),
-    ])
-
-    try:
-        plan = json.loads(response.content)
-    except json.JSONDecodeError:
-        logger.warning("Agent returned non-JSON, using default extraction plan.")
-        plan = _default_extraction_plan()
-
-    # Validate plan has required keys, fall back to defaults if malformed
-    if not isinstance(plan.get("fields_to_extract"), list) or len(plan["fields_to_extract"]) == 0:
-        logger.warning("Agent plan missing fields_to_extract, using defaults.")
-        plan = _default_extraction_plan()
-
-    state["extraction_plan"] = plan
-    state["agent_decision"] = plan.get("decision", "proceed")
-    state["agent_reasoning"] = plan.get("reasoning", "")
-
-    logger.info(
-        "Agent plan: extract %d fields, filter_status=%s — %s",
-        len(plan["fields_to_extract"]),
-        plan.get("filter_status"),
-        plan.get("reasoning", ""),
+def load_geojson(state: PipelineState) -> PipelineState:
+    """Parse HawkerCentresGEOJSON.geojson into validated HawkerCentreRecord records."""
+    geojson_path = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)),
+        "HawkerCentresGEOJSON.geojson",
     )
-    return state
+    with open(geojson_path) as f:
+        gj = json.load(f)
 
-
-def _default_extraction_plan() -> dict:
-    """Fallback extraction plan if the LLM response is unusable."""
-    return {
-        "decision": "proceed",
-        "reasoning": "Default plan: extract core hawker centre fields for price prediction.",
-        "filter_status": "Existing",
-        "fields_to_extract": [
-            {"source_key": "NAME", "target_column": "hawker_name", "dtype": "string"},
-            {"source_key": "ADDRESSPOSTALCODE", "target_column": "hawker_postal_code", "dtype": "string"},
-            {"source_key": "ADDRESSSTREETNAME", "target_column": "hawker_street", "dtype": "string"},
-            {"source_key": "ADDRESSBLOCKHOUSENUMBER", "target_column": "hawker_block", "dtype": "string"},
-            {"source_key": "ADDRESS_MYENV", "target_column": "hawker_address", "dtype": "string"},
-            {"source_key": "NUMBER_OF_COOKED_FOOD_STALLS", "target_column": "hawker_num_stalls", "dtype": "int"},
-            {"source_key": "STATUS", "target_column": "hawker_status", "dtype": "string"},
-            {"source_key": "EST_ORIGINAL_COMPLETION_DATE", "target_column": "hawker_est_completion", "dtype": "string"},
-        ],
-    }
-
-
-def extract_data(state: PipelineState) -> PipelineState:
-    """Extract flat records from raw GeoJSON features based on the agent's plan."""
-    logger.info("Node: extract_data")
-
-    plan = state["extraction_plan"]
-    field_map = plan["fields_to_extract"]
-    filter_status = plan.get("filter_status")
-
-    records = []
-    skipped = 0
-
-    for feature in state["raw_features"]:
-        props = feature.get("properties", {})
-        geom = feature.get("geometry", {})
-        coords = geom.get("coordinates", [None, None])
-
-        # Optional status filter
-        if filter_status and props.get("STATUS", "") != filter_status:
-            skipped += 1
+    records: list[dict] = []
+    for feat in gj.get("features", []):
+        props = feat.get("properties") or {}
+        coords = (feat.get("geometry") or {}).get("coordinates", [])
+        if len(coords) < 2 or not props.get("NAME"):
             continue
+        # Only keep existing hawker centres
+        if props.get("STATUS") != "Existing":
+            continue
+        try:
+            stall_count = props.get("NUMBER_OF_COOKED_FOOD_STALLS")
+            if stall_count is not None:
+                stall_count = int(stall_count)
+        except (ValueError, TypeError):
+            stall_count = None
+        try:
+            rec = HawkerCentreRecord(
+                hawker_name=props["NAME"],
+                hawker_lat=float(coords[1]),
+                hawker_lng=float(coords[0]),
+                hawker_postal_code=props.get("ADDRESSPOSTALCODE") or None,
+                hawker_status=props.get("STATUS") or None,
+                hawker_stall_count=stall_count,
+                hawker_original_completion_year=props.get("EST_ORIGINAL_COMPLETION_DATE") or None,
+                hawker_hup_completion_date=props.get("HUP_COMPLETION_DATE") or None,
+                hawker_description=props.get("DESCRIPTION") or None,
+            )
+            records.append(rec.model_dump())
+        except Exception as e:
+            logger.warning("Skipping invalid feature: %s", e)
 
-        row = {
-            "hawker_lat": coords[1] if len(coords) > 1 else None,
-            "hawker_lng": coords[0] if len(coords) > 0 else None,
-        }
-
-        for fm in field_map:
-            src = fm["source_key"]
-            tgt = fm["target_column"]
-            val = props.get(src)
-
-            # Type coercion
-            if fm.get("dtype") == "int" and val is not None:
-                try:
-                    val = int(val)
-                except (ValueError, TypeError):
-                    val = None
-            elif fm.get("dtype") == "double" and val is not None:
-                try:
-                    val = float(val)
-                except (ValueError, TypeError):
-                    val = None
-
-            row[tgt] = val
-
-        records.append(row)
-
-    state["extracted_data"] = records
-    state["quality_report"] = {
-        "total_features": len(state["raw_features"]),
-        "extracted": len(records),
-        "filtered_out": skipped,
-        "filter_status": filter_status,
-        "null_lat_count": sum(1 for r in records if r.get("hawker_lat") is None),
-        "null_name_count": sum(1 for r in records if r.get("hawker_name") is None),
-    }
-
-    logger.info(
-        "Extracted %d records (%d filtered out by status='%s')",
-        len(records), skipped, filter_status,
-    )
+    state["raw_data"] = records
+    logger.info("Loaded %d hawker centre records from GeoJSON", len(records))
     return state
 
 
 def validate_extraction(state: PipelineState) -> PipelineState:
-    """LLM agent reviews extraction quality and decides next step."""
-    logger.info("Node: validate_extraction")
+    """Agent loop: LLM uses inspect_hawker_data tool then returns a structured quality decision."""
+    records = state["raw_data"]
 
-    qr = state["quality_report"]
+    null_name_count = sum(1 for r in records if not r.get("hawker_name"))
+    status_counts: dict[str, int] = {}
+    for r in records:
+        s = r.get("hawker_status") or "Unknown"
+        status_counts[s] = status_counts.get(s, 0) + 1
 
-    response = llm.invoke([
+    stats_payload = json.dumps({
+        "total_records": len(records),
+        "null_name_count": null_name_count,
+        "status_breakdown": status_counts,
+        "sample_records": records[:3],
+    })
+
+    messages = [
         SystemMessage(content=(
-            "You are a data quality agent. Evaluate the hawker centre extraction report. "
-            "Respond ONLY with valid JSON:\n"
-            '{"decision": "proceed"|"retry"|"abort", "reasoning": "..."}\n'
-            "Rules:\n"
-            "- If extracted >= 80% of total features (after valid filtering): proceed\n"
-            "- If null_lat_count > 10% of extracted: retry (max 2 retries)\n"
-            "- If extracted == 0: abort"
+            "You are a data quality agent for Singapore hawker centre data. "
+            "Use the inspect_hawker_data tool to assess the records, then decide whether to proceed. "
+            "Expected thresholds: ≥100 total records, null_name_count == 0."
         )),
         HumanMessage(content=(
-            f"Quality report: {json.dumps(qr)}. "
-            f"Retry count: {state['retry_count']}. Max retries: 2."
+            f"I have loaded {len(records)} hawker centre records from HawkerCentresGEOJSON.geojson. "
+            "Please inspect the data and give your quality assessment."
         )),
-    ])
+    ]
 
-    try:
-        agent_output = json.loads(response.content)
-    except json.JSONDecodeError:
-        # Fallback rule-based decision
-        if qr["extracted"] == 0:
-            agent_output = {"decision": "abort", "reasoning": "No records extracted."}
-        elif qr["null_lat_count"] / max(qr["extracted"], 1) > 0.1:
-            agent_output = {"decision": "retry", "reasoning": "Too many null coordinates."}
-        else:
-            agent_output = {"decision": "proceed", "reasoning": "Fallback: quality looks acceptable."}
+    # Agentic tool-call loop (max 3 iterations)
+    for _ in range(3):
+        response = llm_with_tools.invoke(messages)
+        messages.append(response)
+        if not response.tool_calls:
+            break
+        for tc in response.tool_calls:
+            if tc["name"] == "inspect_hawker_data":
+                messages.append(ToolMessage(content=stats_payload, tool_call_id=tc["id"]))
 
-    state["agent_decision"] = agent_output["decision"]
-    state["agent_reasoning"] = agent_output["reasoning"]
+    # Structured final decision via Pydantic
+    messages.append(HumanMessage(content="Provide your final structured quality assessment."))
+    result: ExtractionQuality = llm.with_structured_output(ExtractionQuality).invoke(messages)
 
-    if agent_output["decision"] == "retry":
-        state["retry_count"] += 1
-
-    logger.info("Agent QA Decision: %s — %s", agent_output["decision"], agent_output["reasoning"])
+    state["agent_decision"] = result.decision
+    state["agent_reasoning"] = result.reasoning
+    logger.info("QA Decision: %s — %s", result.decision, result.reasoning)
     return state
 
 
 def transform_data(state: PipelineState) -> PipelineState:
-    """Use PySpark to clean and finalize the extracted hawker centre data."""
-    logger.info("Node: transform_data")
-
-    records = state["extracted_data"]
-    if not records:
-        state["transformed_data"] = []
-        return state
-
-    # Infer columns from extraction plan + lat/lng
-    columns = ["hawker_lat", "hawker_lng"] + [
-        fm["target_column"] for fm in state["extraction_plan"]["fields_to_extract"]
-    ]
-
-    # Build PySpark schema dynamically
-    type_map = {"string": StringType(), "int": IntegerType(), "double": DoubleType()}
-    fields = [
+    """Deduplicate and sort hawker centre records with Spark."""
+    schema = StructType([
+        StructField("hawker_name", StringType(), True),
         StructField("hawker_lat", DoubleType(), True),
         StructField("hawker_lng", DoubleType(), True),
-    ]
-    for fm in state["extraction_plan"]["fields_to_extract"]:
-        spark_type = type_map.get(fm.get("dtype", "string"), StringType())
-        fields.append(StructField(fm["target_column"], spark_type, True))
+        StructField("hawker_postal_code", StringType(), True),
+        StructField("hawker_status", StringType(), True),
+        StructField("hawker_stall_count", IntegerType(), True),
+        StructField("hawker_original_completion_year", StringType(), True),
+        StructField("hawker_hup_completion_date", StringType(), True),
+        StructField("hawker_description", StringType(), True),
+    ])
 
-    schema = StructType(fields)
-
-    # Create DataFrame
-    rows = [{col: r.get(col) for col in columns} for r in records]
-    df = spark.createDataFrame(rows, schema=schema)
-
-    # Drop duplicates
+    df = spark.createDataFrame(state["raw_data"], schema=schema)
     df = df.dropDuplicates()
+    df = df.filter(F.col("hawker_name").isNotNull())
+    df = df.orderBy("hawker_name")
 
-    # Drop rows with null coordinates
-    df = df.filter(F.col("hawker_lat").isNotNull() & F.col("hawker_lng").isNotNull())
-
-    # Drop rows with null name
-    if "hawker_name" in df.columns:
-        df = df.filter(F.col("hawker_name").isNotNull())
-
-    # Round coordinates to 8 decimal places for consistency
-    df = df.withColumn("hawker_lat", F.round(F.col("hawker_lat"), 8))
-    df = df.withColumn("hawker_lng", F.round(F.col("hawker_lng"), 8))
-
-    state["transformed_data"] = [row.asDict() for row in df.collect()]
-    logger.info("Transformed %d hawker centre records", len(state["transformed_data"]))
+    state["validated_data"] = [row.asDict() for row in df.collect()]
+    logger.info("Transformed %d hawker centre records", len(state["validated_data"]))
     return state
+
 
 def decide_output(state: PipelineState) -> PipelineState:
-    """Write final hawker centre data to CSV."""
-    logger.info("Node: decide_output")
-
-    output_dir = SCRIPT_DIR
-    os.makedirs(output_dir, exist_ok=True)
+    """Write final hawker centre data to hawker_centres.csv."""
+    output_dir = os.path.dirname(os.path.abspath(__file__))
     path = os.path.join(output_dir, "hawker_centres.csv")
 
-    # Build explicit schema to avoid inference failures on all-null columns
-    type_map = {"string": StringType(), "int": IntegerType(), "double": DoubleType()}
-    fields = [
-        StructField("hawker_lat", DoubleType(), True),
-        StructField("hawker_lng", DoubleType(), True),
-    ]
-    for fm in state["extraction_plan"]["fields_to_extract"]:
-        spark_type = type_map.get(fm.get("dtype", "string"), StringType())
-        fields.append(StructField(fm["target_column"], spark_type, True))
-    schema = StructType(fields)
-
-    df = spark.createDataFrame(state["transformed_data"], schema=schema)
-
-    # Reorder columns: name first, then location, then metadata
-    preferred_order = [
+    output_cols = [
         "hawker_name", "hawker_lat", "hawker_lng", "hawker_postal_code",
-        "hawker_street", "hawker_block", "hawker_address",
-        "hawker_num_stalls", "hawker_status", "hawker_est_completion",
+        "hawker_status", "hawker_stall_count", "hawker_original_completion_year",
+        "hawker_hup_completion_date", "hawker_description",
     ]
-    existing_cols = [c for c in preferred_order if c in df.columns]
-    remaining_cols = [c for c in df.columns if c not in existing_cols]
-    df = df.select(existing_cols + remaining_cols)
 
-    df.toPandas().to_csv(path, index=False)
+    (
+        spark.createDataFrame(state["validated_data"])
+        .toPandas()[output_cols]
+        .to_csv(path, index=False)
+    )
 
     state["output_path"] = path
-    state["agent_reasoning"] = f"CSV output written to {path}"
-    logger.info("Output written to %s (%d rows)", path, len(state["transformed_data"]))
+    logger.info("Output written to %s", path)
     return state
 
-def route_after_plan(state: PipelineState) -> Literal["extract_data", "__end__"]:
-    if state["agent_decision"] == "abort":
-        logger.warning("Agent aborted at planning: %s", state["agent_reasoning"])
-        return END
-    return "extract_data"
 
+# ── Routing ───────────────────────────────────────────────────────────────────
 
-def route_after_validation(
-    state: PipelineState,
-) -> Literal["transform_data", "extract_data", "__end__"]:
+def route_after_validation(state: PipelineState) -> Literal["transform_data", "__end__"]:
     if state["agent_decision"] == "proceed":
         return "transform_data"
-    elif state["agent_decision"] == "retry" and state["retry_count"] <= 2:
-        return "extract_data"
-    else:
-        logger.warning("Agent aborted after validation: %s", state["agent_reasoning"])
-        return END
+    logger.warning("Pipeline aborted: %s", state["agent_reasoning"])
+    return END
 
 
-# Build LangGraph Pipeline 
+# ── Graph ─────────────────────────────────────────────────────────────────────
 
 workflow = StateGraph(PipelineState)
 
-workflow.add_node("plan_extraction", plan_extraction)
-workflow.add_node("extract_data", extract_data)
+workflow.add_node("load_geojson", load_geojson)
 workflow.add_node("validate_extraction", validate_extraction)
 workflow.add_node("transform_data", transform_data)
 workflow.add_node("decide_output", decide_output)
 
-workflow.set_entry_point("plan_extraction")
-workflow.add_conditional_edges("plan_extraction", route_after_plan)
-workflow.add_edge("extract_data", "validate_extraction")
+workflow.set_entry_point("load_geojson")
+workflow.add_edge("load_geojson", "validate_extraction")
 workflow.add_conditional_edges("validate_extraction", route_after_validation)
 workflow.add_edge("transform_data", "decide_output")
 workflow.add_edge("decide_output", END)
 
 app = workflow.compile()
 
+
 if __name__ == "__main__":
     initial_state: PipelineState = {
-        "geojson_path": GEOJSON_PATH,
-        "raw_features": [],
-        "extraction_plan": {},
-        "extracted_data": [],
+        "raw_data": [],
         "validated_data": [],
-        "transformed_data": [],
-        "quality_report": {},
         "agent_decision": "",
         "agent_reasoning": "",
-        "retry_count": 0,
         "output_path": "",
     }
 
@@ -409,6 +275,5 @@ if __name__ == "__main__":
 
     logger.info("═══ Hawker Centre ETL Pipeline Complete ═══")
     logger.info("Output: %s", final_state.get("output_path", "N/A"))
-    logger.info("Records: %d", len(final_state.get("transformed_data", [])))
-    logger.info("Quality Report: %s", json.dumps(final_state.get("quality_report", {}), indent=2))
+    logger.info("Records: %d", len(final_state.get("validated_data", [])))
     logger.info("Agent reasoning: %s", final_state.get("agent_reasoning", ""))
