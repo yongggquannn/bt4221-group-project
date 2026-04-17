@@ -4,11 +4,12 @@ An end-to-end pipeline for predicting HDB resale flat prices in Singapore using 
 
 **Pipeline Overview:**
 
-1. **Dataset Extraction** — Auxiliary amenity datasets (hawker centres, shopping malls, supermarkets, MRT/LRT stations, schools)
+1. **Dataset Extraction** — Auxiliary amenity datasets (hawker centres, shopping malls, supermarkets, MRT/LRT stations, schools, demographics, HDB Resale Price Index)
 2. **HDB Data Loading & Geocoding** — Downloads resale price data from Data.gov.sg and geocodes addresses via OneMap
 3. **Data Cleaning** — LLM-guided agent profiles the data and applies structured PySpark cleaning operations
 4. **Exploratory Data Analysis** — Price trends, distributions, and correlations
 5. **ML Pipeline** — LangGraph-orchestrated pipeline with feature engineering, model training, and evaluation agents
+6. **Out-of-Time Validation** — Re-evaluates the winning model on the most recent transactions to measure real-world drift
 
 ---
 
@@ -87,13 +88,15 @@ os.chdir('/content/drive/MyDrive/bt4221-group-project')
 ### Section notes
 
 
-| Section                    | Runtime                    | Notes                                                                                                                        |
-| -------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **1 — Dataset Extraction** | 5–15 min                   | Skipped automatically if CSV files already exist in `dataset/`                                                               |
-| **2 — HDB Data Loading**   | 2–5 min                    | Downloads ~1M rows from Data.gov.sg                                                                                          |
-| **2e — Geocoding**         | 20–40 min (first run only) | Geocodes ~10k unique addresses via OneMap; results cached to `dataset/geocoded_addresses.csv` and skipped on subsequent runs |
-| **3 — Data Cleaning**      | 5–10 min                   | Requires `OPENAI_API_KEY` for LLM-guided cleaning                                                                            |
-| **4 — ML Pipeline**        | 5–10 min                   | Feature engineering stubs — see TODO items                                                                                   |
+| Section                            | Runtime                    | Notes                                                                                                                        |
+| ---------------------------------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| **1 — Dataset Extraction**         | 5–15 min                   | Skipped automatically if CSV files already exist in `dataset/`                                                               |
+| **2 — HDB Data Loading**           | 2–5 min                    | Downloads ~1M rows from Data.gov.sg                                                                                          |
+| **2e — Geocoding**                 | 20–40 min (first run only) | Geocodes ~10k unique addresses via OneMap; results cached to `dataset/geocoded_addresses.csv` and skipped on subsequent runs |
+| **3 — Data Cleaning**              | 5–10 min                   | Requires `OPENAI_API_KEY` for LLM-guided cleaning                                                                            |
+| **4 — Exploratory Data Analysis**  | 1–3 min                    | Price trends, distributions, geographic scatter, lease vs. price                                                             |
+| **5 — ML Pipeline**                | 5–10 min                   | LangGraph-orchestrated feature engineering + training of GBT, Random Forest, ElasticNet                                      |
+| **6 — Out-of-Time Validation**     | 1–2 min                    | Re-evaluates the winning model on the most recent transactions                                                               |
 
 
 ---
